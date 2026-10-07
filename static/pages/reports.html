@@ -30,6 +30,7 @@
         <label style="margin:0 6px 0 0;align-self:center">项目</label>
         <select id="project-select" style="max-width:240px" onchange="switchProject(this.value)"></select>
         <span style="flex:1"></span>
+        <button class="btn secondary" id="btn-compare">构建对比</button>
         <button class="btn secondary" id="btn-refresh">刷新</button>
       </div>
     </div>
@@ -66,7 +67,9 @@ async function init() {
   const params = new URLSearchParams(location.search);
   projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
   await loadAll();
-  if (builds[0]) selectBuild(builds[0].id);
+  const wanted = params.get("build_id");
+  if (wanted && builds.some(b => b.id === wanted)) selectBuild(wanted);
+  else if (builds[0]) selectBuild(builds[0].id);
 }
 
 async function switchProject(id) { projectId = id; currentBuild = null; await loadAll(); }
@@ -102,6 +105,8 @@ async function loadBuilds() {
     <div class="build-item ${b.id===currentBuild?'active':''}" onclick="selectBuild('${b.id}')">
       <div class="row spread"><strong>${esc(b.name||b.id)}</strong>${statusBadge(b.status)}</div>
       <div class="muted" style="font-size:12px">通过 ${b.passed||0}/${b.total||0} · ${fmtDur(b.duration)} · ${fmtTime(b.finished_at)}</div>
+      <div style="font-size:12px;margin-top:2px"><a href="/page/compare.html?project_id=${projectId}&base=${b.id}"
+        onclick="event.stopPropagation()">设为基准去对比 →</a></div>
     </div>`).join("");
 }
 
@@ -163,6 +168,10 @@ function renderReport(r) {
 }
 
 $("#btn-refresh").onclick = async () => { await loadAll(); if (currentBuild) selectBuild(currentBuild); };
+$("#btn-compare").onclick = () => {
+  const q = currentBuild ? `&base=${currentBuild}` : "";
+  location.href = `/page/compare.html?project_id=${projectId}${q}`;
+};
 
 init();
 </script>

@@ -21,7 +21,7 @@ if BASE_DIR not in sys.path:
 
 from engine import (Scheduler, TestExecutor, EnvironmentManager,          # noqa: E402
                     CoverageAnalyzer, ReportGenerator, DefectManager,
-                    NotificationManager)
+                    NotificationManager, BuildComparator)
 from storage import StoreRegistry, BuildStoreRegistry                       # noqa: E402
 from web import api                                                         # noqa: E402
 from web.seed import seed_demo_data                                         # noqa: E402
@@ -43,6 +43,7 @@ def create_app(data_root: str | None = None) -> Flask:
     env_manager = EnvironmentManager(registry, data_root)
     coverage = CoverageAnalyzer(build_registry)
     report_gen = ReportGenerator(build_registry)
+    comparator = BuildComparator(build_registry, registry, coverage, env_manager)
     defects = DefectManager(registry)
     notify = NotificationManager(registry)
     scheduler = Scheduler(
@@ -59,6 +60,7 @@ def create_app(data_root: str | None = None) -> Flask:
     app.config["ENV_MANAGER"] = env_manager
     app.config["COVERAGE"] = coverage
     app.config["REPORT_GEN"] = report_gen
+    app.config["COMPARE"] = comparator
     app.config["DEFECTS"] = defects
     app.config["NOTIFY"] = notify
     app.config["JSON_AS_ASCII"] = False
@@ -83,6 +85,10 @@ def create_app(data_root: str | None = None) -> Flask:
         try:
             scheduler.submit_build(
                 seeded["project"]["id"], seeded["suite_id"], trigger="auto_seed")
+            # 再跑一场不同环境的构建，让「构建对比」页一打开就有可比的数据
+            scheduler.submit_build(
+                seeded["project"]["id"], seeded["suite_id"],
+                env_id=seeded["env2_id"], trigger="auto_seed")
         except Exception:  # noqa: BLE001
             pass
 

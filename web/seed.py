@@ -140,4 +140,5 @@ def seed_demo_data(registry, env_mgr, notify_mgr) -> dict:
         "events": ["build.failed"],
     })
 
-    return {"project": proj, "env_id": env["id"], "suite_id": suite["id"]}
+    return {"project": proj, "env_id": env["id"], "env2_id": env2["id"],
+            "suite_id": suite["id"]}

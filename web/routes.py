@@ -45,6 +45,10 @@ def _report():
     return current_app.config["REPORT_GEN"]
 
 
+def _compare():
+    return current_app.config["COMPARE"]
+
+
 def _coverage():
     return current_app.config["COVERAGE"]
 
@@ -367,6 +371,19 @@ def list_builds():
 @api.get("/builds/running")
 def list_running():
     return jsonify({"running": _scheduler().running()})
+
+
+@api.get("/builds/compare")
+def compare_builds():
+    """对比两场构建：对齐用例集合，输出并排指标、状态迁移与可比性说明。"""
+    base_id = request.args.get("base")
+    target_id = request.args.get("target")
+    if not base_id or not target_id:
+        return _err("请提供 base 与 target 两个构建 id")
+    result = _compare().compare(base_id, target_id)
+    if "error" in result:
+        return _err(result["error"], 404)
+    return jsonify(result)
 
 
 @api.get("/builds/<build_id>")
