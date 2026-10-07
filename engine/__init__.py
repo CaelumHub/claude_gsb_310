@@ -8,6 +8,7 @@
 - :mod:`engine.environments`环境管理（配置、依赖解析、工作区隔离）
 - :mod:`engine.coverage`    代码覆盖率分析（模拟，按构建稳定生成）
 - :mod:`engine.report`      测试报告生成（通过率 / 耗时 / 分组 / 趋势）
+- :mod:`engine.compare`     构建对比（用例集合对齐 / 差异分类 / 环境差异）
 - :mod:`engine.defects`     缺陷跟踪
 - :mod:`engine.notify`      通知与集成
 - :mod:`engine.scheduler`   并发调度（构建池 + 用例池 + 定时触发循环）
@@ -25,6 +26,7 @@ from .executor import TestExecutor, ExecutionError
 from .environments import EnvironmentManager
 from .coverage import CoverageAnalyzer
 from .report import ReportGenerator
+from .compare import BuildComparator
 from .defects import DefectManager
 from .notify import NotificationManager
 from .scheduler import Scheduler
@@ -43,6 +45,7 @@ __all__ = [
     "EnvironmentManager",
     "CoverageAnalyzer",
     "ReportGenerator",
+    "BuildComparator",
     "DefectManager",
     "NotificationManager",
     "Scheduler",

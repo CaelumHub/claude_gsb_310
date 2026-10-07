@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>构建对比 - 自动化测试与持续集成平台</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .picker { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .picker h3 { margin: 0 0 10px; font-size: 14px; color: var(--text-muted); }
+    .verdict { border-radius: 10px; padding: 16px 18px; margin-bottom: 20px; border: 1px solid var(--border); }
+    .verdict .head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .verdict .label { font-size: 18px; font-weight: 700; }
+    .verdict ul { margin: 8px 0 0; padding-left: 20px; }
+    .verdict .caveats { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); font-size: 13px; }
+    .verdict.regression { background: #fdecec; border-color: #f3c2c2; }
+    .verdict.regression .label { color: var(--red); }
+    .verdict.improved { background: #e7f6ec; border-color: #bfe6cd; }
+    .verdict.improved .label { color: var(--green); }
+    .verdict.mixed { background: #fef3e2; border-color: #f0d9b5; }
+    .verdict.mixed .label { color: var(--amber); }
+    .verdict.stable { background: var(--primary-soft); }
+    .verdict.stable .label { color: var(--primary); }
+    .verdict.inconclusive { background: #f1f5f9; }
+    .verdict.inconclusive .label { color: #64748b; }
+    .conf { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: rgba(0,0,0,.06); color: var(--text-muted); }
+    .delta { font-weight: 600; white-space: nowrap; }
+    .delta.good { color: var(--green); }
+    .delta.bad { color: var(--red); }
+    .delta.flat { color: var(--text-muted); font-weight: 400; }
+    .bucket-row { display: grid; grid-template-columns: 90px 1fr 1fr; gap: 10px; align-items: center; margin-bottom: 6px; font-size: 13px; }
+    .bucket-row .bar { height: 14px; }
+    .bucket-row .cnt { font-size: 12px; color: var(--text-muted); margin-left: 6px; }
+    .legend { display: flex; gap: 16px; font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 4px; }
+    .case-name { font-weight: 500; }
+    .section-note { font-size: 13px; color: var(--text-muted); margin: -6px 0 10px; }
+    .detail-links a { margin-right: 8px; font-size: 12px; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar" id="site-sidebar"></aside>
+
+  <main class="main">
+    <h1 class="page-title">构建对比</h1>
+    <p class="page-desc">选择两场构建，并列对比通过率、失败用例、耗时分布与覆盖率变化；自动对齐用例集合，标注「新增失败 / 已修复 / 持续失败」，并区分环境差异与真实退化。</p>
+
+    <!-- 构建选择 -->
+    <div class="card">
+      <div class="picker">
+        <div>
+          <h3>基准构建（旧）</h3>
+          <label>项目</label>
+          <select id="base-project"></select>
+          <label style="margin-top:8px">构建</label>
+          <select id="base-build"></select>
+        </div>
+        <div>
+          <h3>目标构建（新）</h3>
+          <label>项目</label>
+          <select id="target-project"></select>
+          <label style="margin-top:8px">构建</label>
+          <select id="target-build"></select>
+        </div>
+      </div>
+      <div class="row mt">
+        <button class="btn" id="btn-compare">开始对比</button>
+        <button class="btn secondary" id="btn-swap">⇄ 交换基准 / 目标</button>
+        <span class="muted" style="font-size:13px">支持跨项目、跨环境、跨套件选择；集合不一致的部分会单独说明</span>
+      </div>
+    </div>
+
+    <div id="result"><div class="empty">请选择两场构建后点击「开始对比」</div></div>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+renderNav("compare");
+
+const side = { base: { builds: [] }, target: { builds: [] } };
+
+/* ---------- 初始化与选择器 ---------- */
+async function init() {
+  const params = new URLSearchParams(location.search);
+  const data = await api("/api/projects");
+  const projects = data.projects || [];
+  if (!projects.length) {
+    $("#result").innerHTML = '<div class="empty">暂无项目。请先到 <a href="/page/projects.html">项目管理</a> 页创建项目。</div>';
+    return;
+  }
+  for (const s of ["base", "target"]) {
+    $(`#${s}-project`).innerHTML = projects.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
+    $(`#${s}-project`).onchange = () => loadBuilds(s);
+  }
+  await Promise.all([loadBuilds("base"), loadBuilds("target")]);
+
+  const paramBase = params.get("base"), paramTarget = params.get("target");
+  if (paramBase) await pickBuild("base", paramBase);
+  if (paramTarget) await pickBuild("target", paramTarget);
+
+  // 只有一侧带参数时，另一侧默认取同项目中相邻的另一场构建
+  if (paramBase && !paramTarget) {
+    $("#target-project").value = $("#base-project").value;
+    await loadBuilds("target");
+    const idx = side.target.builds.findIndex(b => b.id === paramBase);
+    const cand = side.target.builds[idx - 1] || side.target.builds.find(b => b.id !== paramBase);
+    if (cand) $("#target-build").value = cand.id;
+  }
+  if (paramTarget && !paramBase) {
+    $("#base-project").value = $("#target-project").value;
+    await loadBuilds("base");
+    const idx = side.base.builds.findIndex(b => b.id === paramTarget);
+    const cand = side.base.builds[idx + 1] || side.base.builds.find(b => b.id !== paramTarget);
+    if (cand) $("#base-build").value = cand.id;
+  }
+  // 无参数默认：目标 = 最新构建，基准 = 次新构建
+  if (!paramBase && !paramTarget) {
+    if (side.target.builds[0]) $("#target-build").value = side.target.builds[0].id;
+    const cand = side.base.builds.find(b => b.id !== $("#target-build").value);
+    if (cand) $("#base-build").value = cand.id;
+  }
+
+  if ($("#base-build").value && $("#target-build").value &&
+      $("#base-build").value !== $("#target-build").value) {
+    runCompare();
+  }
+}
+
+/* 按 id 选中构建：若不在当前项目下，先切换到其所属项目再加载 */
+async function pickBuild(s, buildId) {
+  try {
+    const b = await api(`/api/builds/${buildId}`);
+    if (b.project_id && $(`#${s}-project`).value !== b.project_id) {
+      $(`#${s}-project`).value = b.project_id;
+      await loadBuilds(s);
+    }
+    $(`#${s}-build`).value = buildId;
+  } catch (e) { /* 构建可能已删除，保持默认 */ }
+}
+
+async function loadBuilds(s) {
+  const pid = $(`#${s}-project`).value;
+  const d = await api(`/api/builds?project_id=${pid}`);
+  side[s].builds = d.builds || [];
+  $(`#${s}-build`).innerHTML = side[s].builds.length
+    ? side[s].builds.map(b => `<option value="${b.id}">${esc(b.name || b.id)} · ${fmtTime(b.finished_at || b.created_at)} · ${STATUS_LABELS[b.status] || b.status}</option>`).join("")
+    : '<option value="">（暂无构建）</option>';
+}
+
+$("#btn-swap").onclick = async () => {
+  const bp = $("#base-project").value, bb = $("#base-build").value;
+  $("#base-project").value = $("#target-project").value;
+  await loadBuilds("base");
+  $("#base-build").value = $("#target-build").value;
+  $("#target-project").value = bp;
+  await loadBuilds("target");
+  $("#target-build").value = bb;
+  runCompare();
+};
+
+$("#btn-compare").onclick = runCompare;
+
+/* ---------- 对比 ---------- */
+async function runCompare() {
+  const base = $("#base-build").value, target = $("#target-build").value;
+  if (!base || !target) { toast("请先选择两场构建", "err"); return; }
+  if (base === target) { toast("基准与目标不能是同一场构建", "err"); return; }
+  const btn = $("#btn-compare");
+  setLoading(btn, true, "对比中…");
+  try {
+    const r = await api(`/api/builds/compare?base=${encodeURIComponent(base)}&target=${encodeURIComponent(target)}`);
+    const u = new URL(location.href);
+    u.searchParams.set("base", base); u.searchParams.set("target", target);
+    history.replaceState(null, "", u);
+    render(r);
+  } catch (e) {
+    toast(e.message, "err");
+  } finally {
+    setLoading(btn, false);
+  }
+}
+
+/* ---------- 渲染 ---------- */
+function deltaHtml(v, unit, invert = false, digits = 1) {
+  if (v == null || isNaN(v)) return '<span class="delta flat">—</span>';
+  if (Math.abs(v) < 1e-9) return '<span class="delta flat">±0</span>';
+  const up = v > 0;
+  // invert=true 表示「上升是坏事」（如耗时、失败数）
+  const cls = (up !== invert) ? "good" : "bad";
+  const arrow = up ? "▲" : "▼";
+  return `<span class="delta ${cls}">${arrow} ${Math.abs(v).toFixed(digits)}${unit}</span>`;
+}
+
+function buildHead(ref, links, tag) {
+  return `<div>
+    <span class="tag">${tag}</span> <strong>${esc(ref.name)}</strong> ${statusBadge(ref.status)}
+    <div class="muted" style="font-size:12px;margin-top:2px">
+      套件 ${esc(ref.suite_name || ref.suite_id || "—")} · 触发 ${esc(ref.trigger || "manual")} · ${fmtTime(ref.finished_at)}
+      · <a href="${links.report}">构建详情 →</a>
+    </div>
+  </div>`;
+}
+
+function render(r) {
+  const v = r.verdict || {};
+  const s = r.summary || {}, m = s.matched || {};
+  const c = r.cases || {};
+  const confLabels = { high: "同环境同套件 · 结论可信", medium: "跨套件 · 以共同用例为准", low: "跨环境/跨项目 · 结论需谨慎" };
+  let html = "";
+
+  // 结论横幅
+  html += `<div class="verdict ${v.level || "stable"}">
+    <div class="head">
+      <span class="label">${esc(v.label || "")}</span>
+      <span class="conf">${esc(confLabels[r.confidence] || "")}</span>
+    </div>
+    <ul>${(v.reasons || []).map(x => `<li>${esc(x)}</li>`).join("")}</ul>
+    <div class="grid cols-2" style="margin-top:10px">
+      ${buildHead(r.base, r.links.base, "基准")}
+      ${buildHead(r.target, r.links.target, "目标")}
+    </div>
+    ${(r.caveats || []).length ? `<div class="caveats"><strong>对比说明</strong><ul>${r.caveats.map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>` : ""}
+  </div>`;
+
+  // 关键变化
+  const onlyCount = (c.only_base || []).length + (c.only_target || []).length;
+  html += `<div class="grid cols-4">
+    <div class="stat ${(c.new_failures || []).length ? "bad" : ""}"><div class="v">${(c.new_failures || []).length}</div><div class="k">新增失败</div></div>
+    <div class="stat ${(c.fixed || []).length ? "good" : ""}"><div class="v">${(c.fixed || []).length}</div><div class="k">已修复</div></div>
+    <div class="stat"><div class="v">${(c.still_failing || []).length}</div><div class="k">持续失败</div></div>
+    <div class="stat"><div class="v">${onlyCount}</div><div class="k">仅单侧存在的用例</div></div>
+  </div>`;
+
+  // 总览对比表
+  const b = s.base || {}, t = s.target || {};
+  const cov = r.coverage;
+  html += `<section class="card mt"><h2>总览对比</h2><table>
+    <thead><tr><th>指标</th><th>基准</th><th>目标</th><th>变化</th></tr></thead>
+    <tbody>
+      <tr><td>通过率（全部用例）${r.same_suite ? "" : ' <span class="muted" style="font-size:12px">· 集合不同，仅供参考</span>'}</td>
+        <td>${b.pass_rate}%</td><td>${t.pass_rate}%</td><td>${deltaHtml(s.delta && s.delta.pass_rate, "%")}</td></tr>
+      <tr><td>通过率（共同用例 ${m.count || 0} 条）<span class="muted" style="font-size:12px"> · 严格可比口径</span></td>
+        <td>${m.base_pass_rate ?? 0}%</td><td>${m.target_pass_rate ?? 0}%</td><td>${deltaHtml(m.pass_rate_delta, "%")}</td></tr>
+      <tr><td>用例总数</td><td>${b.total}</td><td>${t.total}</td>
+        <td><span class="delta flat">${s.delta && s.delta.total ? (s.delta.total > 0 ? "+" : "") + s.delta.total : "±0"}</span></td></tr>
+      <tr><td>通过 / 失败 / 错误 / 超时 / 跳过</td>
+        <td>${b.passed}/${b.failed}/${b.error}/${b.timeout}/${b.skipped}</td>
+        <td>${t.passed}/${t.failed}/${t.error}/${t.timeout}/${t.skipped}</td><td></td></tr>
+      <tr><td>总耗时</td><td>${fmtDur(b.duration)}</td><td>${fmtDur(t.duration)}</td><td>${deltaHtml(s.delta && s.delta.duration, "s", true, 2)}</td></tr>
+      ${cov ? `<tr><td>覆盖率</td><td>${cov.base.percent}%</td><td>${cov.target.percent}%</td><td>${deltaHtml(cov.delta, "%")}</td></tr>` : ""}
+    </tbody></table></section>`;
+
+  // 关键用例变化
+  html += caseSection("新增失败", c.new_failures, r, "基准通过、目标失败的用例——最需要关注的退化信号");
+  html += caseSection("已修复", c.fixed, r, "基准失败、目标通过的用例");
+  html += caseSection("持续失败", c.still_failing, r, "两场构建都失败的用例（未修复的历史问题）");
+  html += caseSection("其他状态变化", c.other_changes, r, "涉及跳过等状态的迁移，不计入新增失败/已修复");
+
+  // 用例集合差异
+  html += renderSetDiff(c, r);
+
+  // 耗时分布
+  html += renderDurations(r);
+
+  // 覆盖率
+  if (cov) html += renderCoverage(cov);
+
+  // 环境差异
+  if (r.env_diff && !r.env_diff.same_env) html += renderEnvDiff(r.env_diff);
+
+  $("#result").innerHTML = html;
+}
+
+function caseLinks(item, r) {
+  const cid = item.case_id;
+  return `<span class="detail-links">
+    <a href="${r.links.base.report}">基准构建</a>
+    <a href="${r.links.target.report}">目标构建</a>
+    ${cid ? `<a href="/api/builds/${r.target.id}/cases/${encodeURIComponent(cid)}/log" target="_blank">目标日志</a>` : ""}
+  </span>`;
+}
+
+function caseSection(title, rows, r, note) {
+  rows = rows || [];
+  if (!rows.length) return "";
+  return `<section class="card mt"><h2>${title}（${rows.length}）</h2>
+    ${note ? `<div class="section-note">${esc(note)}</div>` : ""}
+    <table><thead><tr><th>用例</th><th>优先级</th><th>基准结果</th><th>目标结果</th><th>耗时变化</th><th>失败原因</th><th>详情</th></tr></thead>
+    <tbody>${rows.map(x => `<tr>
+      <td class="case-name">${esc(x.case_name || x.case_id)}<div class="muted" style="font-size:12px">${esc(x.group || "")}</div></td>
+      <td>${priorityBadge(x.priority)}</td>
+      <td>${statusBadge(x.base_status)}</td>
+      <td>${statusBadge(x.target_status)}</td>
+      <td>${fmtDur(x.base_duration)} → ${fmtDur(x.target_duration)} ${deltaHtml(x.duration_delta, "s", true, 2)}</td>
+      <td class="muted" style="font-size:13px">${esc(x.reason || "")}</td>
+      <td>${caseLinks(x, r)}</td>
+    </tr>`).join("")}</tbody></table></section>`;
+}
+
+function onlyTable(title, rows, link) {
+  rows = rows || [];
+  if (!rows.length) return "";
+  return `<h3>${title}（${rows.length}）</h3><table>
+    <thead><tr><th>用例</th><th>优先级</th><th>状态</th><th>耗时</th><th>详情</th></tr></thead>
+    <tbody>${rows.map(x => `<tr>
+      <td class="case-name">${esc(x.case_name || x.case_id)}<div class="muted" style="font-size:12px">${esc(x.group || "")}</div></td>
+      <td>${priorityBadge(x.priority)}</td><td>${statusBadge(x.status)}</td><td>${fmtDur(x.duration)}</td>
+      <td><a href="${link}" style="font-size:12px">所在构建 →</a></td>
+    </tr>`).join("")}</tbody></table>`;
+}
+
+function renderSetDiff(c, r) {
+  const hasOnly = (c.only_base || []).length || (c.only_target || []).length;
+  const hasAmb = (c.ambiguous || []).length;
+  if (!hasOnly && !hasAmb) return "";
+  let html = `<section class="card mt"><h2>用例集合差异</h2>
+    <div class="section-note">以下用例只在其中一场构建中存在，不参与逐项对比；两场构建共同用例 ${r.summary.matched.count} 条。</div>
+    <div class="grid cols-2"><div>${onlyTable("仅基准构建存在", c.only_base, r.links.base.report)}</div>
+    <div>${onlyTable("仅目标构建存在", c.only_target, r.links.target.report)}</div></div>`;
+  if (hasAmb) {
+    html += `<h3 class="mt">无法自动对齐的同名用例（${c.ambiguous.length}）</h3>
+      <div class="section-note">同名但用例 id 不同，可能是删除重建或复制的用例。为避免错配，未自动合并对比，请人工确认。</div>
+      <table><thead><tr><th>用例名</th><th>基准中的 id</th><th>目标中的 id</th><th>说明</th></tr></thead>
+      <tbody>${c.ambiguous.map(a => `<tr>
+        <td class="case-name">${esc(a.name)}</td>
+        <td style="font-family:var(--mono);font-size:12px">${esc((a.base_case_ids || []).join(", ") || "—")}</td>
+        <td style="font-family:var(--mono);font-size:12px">${esc((a.target_case_ids || []).join(", ") || "—")}</td>
+        <td class="muted" style="font-size:13px">${esc(a.reason)}</td>
+      </tr>`).join("")}</tbody></table>`;
+  }
+  return html + "</section>";
+}
+
+function renderDurations(r) {
+  const d = r.durations || {};
+  const rows = [["平均耗时", "avg"], ["中位耗时", "median"], ["P95", "p95"], ["P99", "p99"], ["最慢", "max"]];
+  const maxCnt = Math.max(1, ...(d.buckets || []).flatMap(x => [x.base, x.target]));
+  return `<section class="card mt"><h2>耗时分布对比</h2>
+    ${d.env_influenced ? '<div class="section-note">⚠ 两场构建运行环境不同，耗时差异可能主要来自环境配置（如模拟延迟），不代表真实性能退化。</div>' : ""}
+    <div class="grid cols-2">
+      <div><table>
+        <thead><tr><th>指标</th><th>基准</th><th>目标</th><th>变化</th></tr></thead>
+        <tbody>${rows.map(([label, k]) => `<tr><td>${label}</td>
+          <td>${fmtDur((d.base || {})[k])}</td><td>${fmtDur((d.target || {})[k])}</td>
+          <td>${deltaHtml(((d.target || {})[k] ?? 0) - ((d.base || {})[k] ?? 0), "s", true, 2)}</td></tr>`).join("")}
+        </tbody></table></div>
+      <div>
+        <div class="legend"><span><i style="background:var(--primary)"></i>基准</span><span><i style="background:var(--amber)"></i>目标</span></div>
+        ${(d.buckets || []).map(x => `<div class="bucket-row">
+          <span class="muted">${esc(x.label)}</span>
+          <span><div class="bar"><i style="width:${Math.round(x.base / maxCnt * 100)}%"></i></div><span class="cnt">${x.base}</span></span>
+          <span><div class="bar amber"><i style="width:${Math.round(x.target / maxCnt * 100)}%"></i></div><span class="cnt">${x.target}</span></span>
+        </div>`).join("")}
+      </div>
+    </div>
+    ${durationTable("变慢最多", d.slower, r)}
+    ${durationTable("变快最多", d.faster, r)}
+  </section>`;
+}
+
+function durationTable(title, rows, r) {
+  rows = rows || [];
+  if (!rows.length) return "";
+  return `<h3 class="mt">${title}（${rows.length}）</h3><table>
+    <thead><tr><th>用例</th><th>基准耗时</th><th>目标耗时</th><th>变化</th><th>详情</th></tr></thead>
+    <tbody>${rows.map(x => `<tr>
+      <td class="case-name">${esc(x.case_name || x.case_id)}</td>
+      <td>${fmtDur(x.base_duration)}</td><td>${fmtDur(x.target_duration)}</td>
+      <td>${deltaHtml(x.duration_delta, "s", true, 2)}${x.duration_pct != null ? ` <span class="muted" style="font-size:12px">(${x.duration_pct > 0 ? "+" : ""}${x.duration_pct}%)</span>` : ""}</td>
+      <td>${caseLinks(x, r)}</td>
+    </tr>`).join("")}</tbody></table>`;
+}
+
+function renderCoverage(cov) {
+  return `<section class="card mt"><h2>覆盖率对比</h2>
+    <div class="grid cols-3">
+      <div class="stat primary"><div class="v">${cov.base.percent}%</div><div class="k">基准覆盖率（${cov.base.covered_lines}/${cov.base.total_lines} 行）</div></div>
+      <div class="stat primary"><div class="v">${cov.target.percent}%</div><div class="k">目标覆盖率（${cov.target.covered_lines}/${cov.target.total_lines} 行）</div></div>
+      <div class="stat ${cov.delta >= 0 ? "good" : "bad"}"><div class="v">${cov.delta > 0 ? "+" : ""}${cov.delta}%</div><div class="k">覆盖率变化</div></div>
+    </div>
+    ${(cov.file_changes || []).length ? `<h3 class="mt">变化最大的文件</h3><table>
+      <thead><tr><th>文件</th><th>基准</th><th>目标</th><th>变化</th></tr></thead>
+      <tbody>${cov.file_changes.map(f => `<tr>
+        <td style="font-family:var(--mono);font-size:13px">${esc(f.file)}</td>
+        <td>${f.base == null ? "—" : f.base + "%"}</td><td>${f.target == null ? "—" : f.target + "%"}</td>
+        <td>${f.delta == null ? '<span class="muted">新增/移除</span>' : deltaHtml(f.delta, "%")}</td>
+      </tr>`).join("")}</tbody></table>` : ""}
+  </section>`;
+}
+
+function renderEnvDiff(env) {
+  const envName = (e) => esc(e.name || e.id || "未知环境") + (e.missing ? ' <span class="muted">(已删除)</span>' : "");
+  return `<section class="card mt"><h2>环境差异</h2>
+    <div class="section-note">基准环境：${envName(env.base_env)} ｜ 目标环境：${envName(env.target_env)}。
+      以下配置差异可能是结果与耗时差异的来源，判断是否真实退化时请排除这些因素。</div>
+    ${(env.items || []).length ? `<table>
+      <thead><tr><th>配置项</th><th>基准环境</th><th>目标环境</th></tr></thead>
+      <tbody>${env.items.map(i => `<tr>
+        <td style="font-family:var(--mono);font-size:13px">${esc(i.key)}</td>
+        <td>${esc(fmtVal(i.base))}</td><td>${esc(fmtVal(i.target))}</td>
+      </tr>`).join("")}</tbody></table>`
+    : '<div class="empty">两套环境的配置项完全一致（仅环境本身不同）</div>'}
+  </section>`;
+}
+
+function fmtVal(v) { return v == null ? "—" : (typeof v === "object" ? JSON.stringify(v) : String(v)); }
+
+init();
+</script>
+</body>
+</html>

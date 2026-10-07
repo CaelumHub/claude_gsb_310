@@ -1,7 +1,7 @@
 """Flask API 路由。
 
-把平台的测试执行引擎、并发调度、结果收集、报告、覆盖率、缺陷、环境、
-定时任务、通知等能力暴露为 REST 接口，前端 10 个页面通过 ``fetch`` 调用。
+把平台的测试执行引擎、并发调度、结果收集、报告、构建对比、覆盖率、缺陷、
+环境、定时任务、通知等能力暴露为 REST 接口，前端 11 个页面通过 ``fetch`` 调用。
 
 所有实体（项目 / 用例 / 套件 / 缺陷 / 环境 / 计划 / 集成）以 JSON 分片
 存储，构建结果按「项目 + 构建」二次分片存储；写路径全部走文件锁 +
@@ -43,6 +43,10 @@ def _env_mgr():
 
 def _report():
     return current_app.config["REPORT_GEN"]
+
+
+def _comparator():
+    return current_app.config["COMPARATOR"]
 
 
 def _coverage():
@@ -375,6 +379,25 @@ def get_build(build_id: str):
     if err:
         return err
     return jsonify(build)
+
+
+@api.get("/builds/compare")
+def compare_builds():
+    """对比两场构建：用例集合对齐 + 差异分类 + 耗时/覆盖率/环境差异。
+
+    用例集合不完全相同时，单侧独有的用例单独列出而不硬比；跨环境对比
+    会给出环境配置差异与置信度提示，区分「环境差异」与「真实退化」。
+    """
+    base_id = request.args.get("base")
+    target_id = request.args.get("target")
+    if not base_id or not target_id:
+        return _err("缺少参数：base 与 target 都要指定")
+    if base_id == target_id:
+        return _err("基准与目标不能是同一场构建")
+    result = _comparator().compare(base_id, target_id)
+    if "error" in result:
+        return _err(result["error"], 404)
+    return jsonify(result)
 
 
 @api.get("/builds/<build_id>/results")

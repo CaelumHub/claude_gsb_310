@@ -66,7 +66,9 @@ async function init() {
   const params = new URLSearchParams(location.search);
   projectId = await fillProjectSelect($("#project-select"), params.get("project_id"));
   await loadAll();
-  if (builds[0]) selectBuild(builds[0].id);
+  const buildParam = params.get("build_id");
+  if (buildParam && builds.some(b => b.id === buildParam)) selectBuild(buildParam);
+  else if (builds[0]) selectBuild(builds[0].id);
 }
 
 async function switchProject(id) { projectId = id; currentBuild = null; await loadAll(); }
@@ -107,6 +109,11 @@ async function loadBuilds() {
 
 async function selectBuild(id) {
   currentBuild = id;
+  // 同步到 URL，让构建详情可分享、可被构建对比页深链
+  const u = new URL(location.href);
+  u.searchParams.set("project_id", projectId);
+  u.searchParams.set("build_id", id);
+  history.replaceState(null, "", u);
   loadBuilds();
   const r = await api(`/api/builds/${id}/report`);
   renderReport(r);
@@ -131,6 +138,8 @@ function renderReport(r) {
     <div class="mt row">
       ${statusBadge(r.status)}
       <span class="muted" style="font-size:13px">触发 ${esc(r.trigger||'manual')} · ${fmtTime(r.started_at)} → ${fmtTime(r.finished_at)}</span>
+      <span style="flex:1"></span>
+      <a class="btn secondary small" href="/page/compare.html?target=${r.build_id}">对比此构建</a>
     </div>
     <div class="mt grid cols-4">
       <div class="stat"><div class="v">${fmtDur(d.avg)}</div><div class="k">平均耗时</div></div>
